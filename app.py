@@ -1,13 +1,12 @@
 import os
 import sys
-
-diretorio_projeto = os.path.dirname(os.path.abspath(__file__))
-os.chdir(diretorio_projeto)
-
 import json
-import datetime
 import threading
 import subprocess
+import datetime
+import requests
+from io import BytesIO
+from PIL import Image
 import customtkinter as ctk
 from tkinter import filedialog
 from google.oauth2.credentials import Credentials
@@ -15,11 +14,14 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
+# Garante que o script execute no diretório correto
+diretorio_projeto = os.path.dirname(os.path.abspath(__file__))
+os.chdir(diretorio_projeto)
+
 # Configurações Globais
 SCOPES = ['https://www.googleapis.com/auth/youtube.force-ssl']
 CONFIG_FILE = 'config.json'
 STATUS_FILE = 'live_status.json'
-CLIENT_SECRET_FILE = 'client_secret.json'
 
 ctk.set_appearance_mode("System")
 ctk.set_default_color_theme("blue")
@@ -28,17 +30,25 @@ ctk.set_default_color_theme("blue")
 # LÓGICA DE BACKEND & API DO YOUTUBE
 # ==========================================
 
+def obter_caminho_credenciais(nome_arquivo="client_secret.json"):
+    diretorio_atual = os.path.dirname(os.path.abspath(__file__))
+    caminho_completo = os.path.join(diretorio_atual, nome_arquivo)
+    if not os.path.exists(caminho_completo):
+        raise FileNotFoundError(f"Arquivo de credenciais não encontrado em: {caminho_completo}")
+    return caminho_completo
+
 def get_authenticated_service():
     creds = None
     if os.path.exists('token.json'):
         creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    
     if not creds or not creds.valid:
-        if not os.path.exists(CLIENT_SECRET_FILE):
-            raise FileNotFoundError(f"Arquivo {CLIENT_SECRET_FILE} não encontrado.")
-        flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
+        caminho_secret = obter_caminho_credenciais("client_secret.json")
+        flow = InstalledAppFlow.from_client_secrets_file(caminho_secret, SCOPES)
         creds = flow.run_local_server(port=0)
         with open('token.json', 'w') as token:
             token.write(creds.to_json())
+            
     return build('youtube', 'v3', credentials=creds)
 
 def checar_autenticacao():
@@ -55,7 +65,6 @@ def carregar_configuracoes():
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 dados = json.load(f)
-                # Garante que a nova chave exista caso venha de um arquivo antigo
                 if "reutilizar_ultima_thumb" not in dados:
                     dados["reutilizar_ultima_thumb"] = True
                 return dados
@@ -76,10 +85,7 @@ def salvar_configuracoes(dados):
         json.dump(dados, f, indent=4, ensure_ascii=False)
 
 def atualizar_arquivo_status(live_id, status):
-    dados = {
-        "id": live_id,
-        "status": status
-    }
+    dados = {"id": live_id, "status": status}
     with open(STATUS_FILE, 'w', encoding='utf-8') as f:
         json.dump(dados, f, indent=4, ensure_ascii=False)
 
@@ -92,21 +98,48 @@ def obter_status_local():
             pass
     return {"id": None, "status": "inativa"}
 
-def atualizar_agendador_windows(hora_inicio, hora_fim):
-    diretorio_atual = os.path.dirname(os.path.abspath(__file__))
-    python_exe = os.path.join(diretorio_atual, "venv", "Scripts", "pythonw.exe")
-    
-    if not os.path.exists(python_exe):
-        python_exe = sys.executable
+def registrar_log_compartilhado(mensagem):
+    agora = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    texto_log = f"[{agora}] {mensagem}\n"
+    with open("execucoes.log", "a", encoding="utf-8") as f:
+        f.write(texto_log)
+        f.flush()
 
-    comando_exec_iniciar = f'cmd.exe /c "cd /d {diretorio_atual} && "{python_exe}" app.py iniciar"'
-    comando_exec_encerrar = f'cmd.exe /c "cd /d {diretorio_atual} && "{python_exe}" app.py encerrar"'
-    
-    cmd_iniciar = ["schtasks", "/create", "/tn", "TVPE_Live_Iniciar", "/tr", comando_exec_iniciar, "/sc", "DAILY", "/st", hora_inicio, "/f"]
-    cmd_encerrar = ["schtasks", "/create", "/tn", "TVPE_Live_Encerrar", "/tr", comando_exec_encerrar, "/sc", "DAILY", "/st", hora_fim, "/f"]
-    
-    subprocess.run(cmd_iniciar, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-    subprocess.run(cmd_encerrar, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+def atualizar_agendador_windows(horarios):
+    """
+    Configura de forma invisível as tarefas agendadas no Windows.
+    """
+    dir_atual = os.path.dirname(os.path.abspath(__file__))
+    python_exe = os.path.join(dir_atual, "venv", "Scripts", "pythonw.exe")
+    app_path = os.path.join(dir_atual, "app.py")
+
+    startupinfo = None
+    if os.name == 'nt':
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0  # SW_HIDE - Oculta o prompt que cria a tarefa
+
+    for acao, hora in horarios.items():
+        hora_fmt = f"{hora}:00"
+        nome_tarefa = f"TVPE_Live_{acao.capitalize()}"
+        
+        # O uso de aspas simples internas é o padrão ouro que o schtasks aceita
+        # para delimitar caminhos e argumentos sem gerar conflitos no Python.
+        comando_tr = f"'{python_exe}' '{app_path}' {acao}"
+        
+        # CORREÇÃO: Removido completamente o argumento '/wd' que quebrava o comando.
+        comando = [
+            "schtasks", "/create", "/tn", nome_tarefa, 
+            "/tr", comando_tr, 
+            "/sc", "DAILY", "/st", hora_fmt, 
+            "/f"
+        ]
+        
+        try:
+            subprocess.run(comando, shell=False, check=True, startupinfo=startupinfo)
+            registrar_log_compartilhado(f"Tarefa {nome_tarefa} agendada para {hora_fmt}")
+        except Exception as e:
+            registrar_log_compartilhado(f"Erro ao agendar {nome_tarefa}: {e}")
 
 def obter_live_ativa_ou_agendada(youtube, apenas_ao_vivo=False):
     request = youtube.liveBroadcasts().list(part="id,status,snippet", mine=True, broadcastType="all", maxResults=5)
@@ -130,13 +163,6 @@ def obter_live_ativa_ou_agendada(youtube, apenas_ao_vivo=False):
         elif status == "live":
             return item["id"]
     return None
-
-def registrar_log_compartilhado(mensagem):
-    agora = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-    texto_log = f"[{agora}] {mensagem}\n"
-    with open("execucoes.log", "a", encoding="utf-8") as f:
-        f.write(texto_log)
-        f.flush()
 
 def preparar_e_criar_metadados(youtube, config):
     dias_semana = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado", "Domingo"]
@@ -184,46 +210,22 @@ def preparar_e_criar_metadados(youtube, config):
 def efetiver_entrada_ao_vivo(youtube, broadcast_id):
     youtube.liveBroadcasts().transition(broadcastStatus="live", id=broadcast_id, part='id,status').execute()
 
-# --- FUNÇÃO DE THUMBNAIL INTELIGENTE COM CONTINGÊNCIA ---
 def gerenciar_upload_thumbnail(youtube, broadcast_id, config):
-    caminho_imagem = config["thumbnail"]
-    sucesso = False
+    caminho_imagem = config.get("thumbnail", "")
+    if not caminho_imagem or not os.path.exists(caminho_imagem):
+        return
 
-    # 1. Tenta fazer o upload do arquivo local configurado se ele existir
-    if os.path.exists(caminho_imagem):
-        try:
-            youtube.thumbnails().set(
-                videoId=broadcast_id, 
-                media_body=MediaFileUpload(caminho_imagem, mimetype='image/jpeg')
-            ).execute()
-            registrar_log_compartilhado("Capa (Thumbnail) local atualizada com sucesso.")
-            sucesso = True
-        except Exception as e:
-            registrar_log_compartilhado(f"⚠️ Falha ao subir imagem local: {e}")
-    else:
-        registrar_log_compartilhado("⚠️ Arquivo de imagem local não foi localizado.")
-
-    # 2. Se falhou ou não existe, e a opção de reutilizar a última estiver marcada:
-    if not sucesso and config.get("reutilizar_ultima_thumb", True):
-        try:
-            registrar_log_compartilhado("Buscando última transmissão concluída para espelhar a capa...")
-            # Busca as últimas transmissões finalizadas (complete)
-            request = youtube.liveBroadcasts().list(part="id,snippet", mine=True, broadcastStatus="complete", maxResults=1)
-            response = request.execute()
-            
-            items = response.get("items", [])
-            if items:
-                ultima_live_id = items[0]["id"]
-                registrar_log_compartilhado(f"Última live detectada: [{ultima_live_id}]. Clonando metadados de imagem...")
-                
-                # O YouTube não permite copiar a URL direto, mas podemos forçar o re-upload ou herdar usando uma marretada limpa:
-                # Como a API obriga um payload físico para o .set(), a melhor contingência é avisar que usará o padrão do estúdio
-                # ou não quebrar a execução se o operador marcou.
-                registrar_log_compartilhado("Nota: Mantendo a identidade visual padrão definida no painel do YouTube Studio.")
-            else:
-                registrar_log_compartilhado("Nenhuma live anterior encontrada para reaproveitamento.")
-        except Exception as fallback_err:
-            registrar_log_compartilhado(f"Não foi possível recuperar histórico de thumbnails: {fallback_err}")
+    try:
+        youtube.thumbnails().set(
+            videoId=broadcast_id, 
+            media_body=MediaFileUpload(caminho_imagem, mimetype='image/jpeg')
+        ).execute()
+        registrar_log_compartilhado("Capa local enviada com sucesso.")
+    except Exception as e:
+        if "429" in str(e) or "uploadRateLimitExceeded" in str(e):
+            registrar_log_compartilhado("⚠️ Aviso: Limite de cota de thumbnails atingido. Usando capa padrão.")
+        else:
+            registrar_log_compartilhado(f"⚠️ Erro ao processar capa: {e}")
 
 # ==========================================
 # INTERFACE GRÁFICA INTERATIVA (GUI)
@@ -232,21 +234,21 @@ def gerenciar_upload_thumbnail(youtube, broadcast_id, config):
 class AppGUI(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("⚙️ Gerenciador de Lives — TV Pernambuco")
+        self.title("⚙️ Gerenciador de Lives")
         self.geometry("680x760") 
         self.resizable(False, False)
         
         self.blink_state = True
         self.status_atual = "inativa" 
-        
         self.config_data = carregar_configuracoes()
+        
         self.build_ui()
         self.atualizar_status_login_ui()
-        
         self.monitorar_log_compartilhado()
         self.atualizar_status_visual()
 
     def build_ui(self):
+        # Painel Lateral de Autenticação
         self.frame_auth = ctk.CTkFrame(self, width=200, corner_radius=10)
         self.frame_auth.pack(side="left", fill="y", padx=15, pady=15)
 
@@ -262,6 +264,7 @@ class AppGUI(ctk.CTk):
         self.btn_logout = ctk.CTkButton(self.frame_auth, text="🚪 Sair da Conta", fg_color="#333333", hover_color="#555555", command=self.acao_logout)
         self.btn_logout.pack(pady=5, padx=15)
 
+        # Painel Principal de Configurações
         self.frame_main = ctk.CTkFrame(self, corner_radius=10)
         self.frame_main.pack(side="right", fill="both", expand=True, padx=(0, 15), pady=15)
 
@@ -291,7 +294,6 @@ class AppGUI(ctk.CTk):
         self.btn_procurar_thumb = ctk.CTkButton(frame_row1, text="📁 ...", width=40, command=self.procurar_thumbnail)
         self.btn_procurar_thumb.grid(row=1, column=2, padx=5, sticky="w")
 
-        # --- NOVA CAIXA DE SELEÇÃO DE THUMBNAIL (CONFORME SOLICITADO) ---
         self.chk_reutilizar_thumb = ctk.CTkCheckBox(self.frame_main, text="Reutilizar capa da última live caso o upload falhe")
         self.chk_reutilizar_thumb.pack(anchor="w", padx=20, pady=(5, 5))
         if self.config_data.get("reutilizar_ultima_thumb", True):
@@ -316,6 +318,7 @@ class AppGUI(ctk.CTk):
                                          fg_color="#1b5e20", hover_color="#2e7d32", height=40, command=self.acao_salvar)
         self.btn_salvar.pack(fill="x", padx=20, pady=10)
 
+        # Barra de Status Dinâmica
         self.frame_status = ctk.CTkFrame(self.frame_main, height=45, fg_color="#1a1a1a", corner_radius=8)
         self.frame_status.pack(fill="x", padx=20, pady=(5, 10))
         
@@ -325,6 +328,7 @@ class AppGUI(ctk.CTk):
         self.lbl_status_texto = ctk.CTkLabel(self.frame_status, text="Verificando sistema...", font=ctk.CTkFont(size=13, weight="bold"))
         self.lbl_status_texto.pack(side="left", padx=2)
 
+        # Botões de Controle Manual
         self.frame_botoes_manuais = ctk.CTkFrame(self.frame_main, fg_color="transparent")
         self.frame_botoes_manuais.pack(fill="x", padx=20, pady=(0, 10))
         
@@ -336,8 +340,51 @@ class AppGUI(ctk.CTk):
                                                  fg_color="#b71c1c", hover_color="#d32f2f", height=35, command=self.acao_encerrar_manual)
         self.btn_encerrar_manual.pack(side="right", fill="x", expand=True, padx=(10, 0))
 
+        # Terminal de Logs Integrado
         self.txt_log = ctk.CTkTextbox(self.frame_main, height=130, width=400, fg_color="#111111", text_color="#00ff00", font=ctk.CTkFont(family="Courier", size=12))
         self.txt_log.pack(fill="x", padx=20, pady=(0, 15))
+
+    def atualizar_status_login_ui(self):
+        if checar_autenticacao():
+            self.lbl_status_login.configure(text="🟢 Autenticado", text_color="#2e7d32")
+            self.btn_login.configure(state="disabled")
+            threading.Thread(target=self.buscar_info_canal, daemon=True).start()
+        else:
+            self.lbl_status_login.configure(text="🔴 Desconectado", text_color="#d32f2f")
+            self.btn_login.configure(state="normal")
+
+    def buscar_info_canal(self):
+        try:
+            youtube = get_authenticated_service()
+            request = youtube.channels().list(part="snippet,contentDetails", mine=True)
+            response = request.execute()
+            
+            if "items" in response:
+                item = response["items"][0]
+                nome_canal = item["snippet"]["title"]
+                url_foto = item["snippet"]["thumbnails"]["default"]["url"]
+                
+                img_data = requests.get(url_foto).content
+                img = Image.open(BytesIO(img_data))
+                ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(60, 60))
+                
+                self.after(0, lambda: self.mostrar_info_canal(nome_canal, ctk_img))
+        except Exception as e:
+            print(f"Erro ao buscar info do canal: {e}")
+
+    def mostrar_info_canal(self, nome, foto_ctk):
+        if not hasattr(self, "frame_info_canal"):
+            self.frame_info_canal = ctk.CTkFrame(self.frame_auth, fg_color="transparent")
+            self.frame_info_canal.pack(pady=10)
+        else:
+            for widget in self.frame_info_canal.winfo_children():
+                widget.destroy()
+        
+        self.lbl_foto = ctk.CTkLabel(self.frame_info_canal, text="", image=foto_ctk)
+        self.lbl_foto.pack()
+        
+        self.lbl_nome_canal = ctk.CTkLabel(self.frame_info_canal, text=nome, font=ctk.CTkFont(size=12, weight="bold"))
+        self.lbl_nome_canal.pack(pady=5)
 
     def atualizar_status_visual(self):
         info_local = obter_status_local()
@@ -390,9 +437,8 @@ class AppGUI(ctk.CTk):
         self.after(500, self.atualizar_status_visual)
 
     def monitorar_log_compartilhado(self):
-        LOG_FILE = "execucoes.log"
         try:
-            with open(LOG_FILE, "r", encoding="utf-8") as f:
+            with open("execucoes.log", "r", encoding="utf-8") as f:
                 linhas = f.readlines()
             self.txt_log.delete("1.0", "end")
             for linha in linhas[-7:]: 
@@ -401,14 +447,6 @@ class AppGUI(ctk.CTk):
         except:
             pass
         self.after(2000, self.monitorar_log_compartilhado)
-
-    def atualizar_status_login_ui(self):
-        if checar_autenticacao():
-            self.lbl_status_login.configure(text="🟢 Autenticado", text_color="#2e7d32")
-            self.btn_login.configure(state="disabled")
-        else:
-            self.lbl_status_login.configure(text="🔴 Desconectado", text_color="#d32f2f")
-            self.btn_login.configure(state="normal")
 
     def procurar_thumbnail(self):
         caminho = filedialog.askopenfilename(filetypes=[("Imagens JPEG", "*.jpg;*.jpeg"), ("Imagens PNG", "*.png")])
@@ -443,12 +481,40 @@ class AppGUI(ctk.CTk):
             "reutilizar_ultima_thumb": bool(self.chk_reutilizar_thumb.get())
         }
         salvar_configuracoes(config)
-        registrar_log_compartilhado("Configurações salvas em config.json.")
+        registrar_log_compartilhado("Configurações salvas. Atualizando Agendador...")
+
+        # CORREÇÃO: Passando o dicionário esperado pela função global
         try:
-            atualizar_agendador_windows(config["hora_inicio"], config["hora_fim"])
-            registrar_log_compartilhado(f"Agendador Windows Atualizado! Início: {config['hora_inicio']} | Fim: {config['hora_fim']}")
+            horarios_agendamento = {
+                "iniciar": config["hora_inicio"],
+                "encerrar": config["hora_fim"]
+            }
+            atualizar_agendador_windows(horarios_agendamento)
         except Exception as e:
-            registrar_log_compartilhado(f"Erro ao configurar Agendador: {e}")
+            registrar_log_compartilhado(f"Erro no Agendador: {e}")
+
+        threading.Thread(target=self.pre_criar_live_agendada, args=(config,), daemon=True).start()
+
+    def pre_criar_live_agendada(self, config):
+        try:
+            if not checar_autenticacao():
+                registrar_log_compartilhado("Erro: Conta não autenticada para criação prévia.")
+                return
+            
+            youtube = get_authenticated_service()
+            broadcast_id = obter_live_ativa_ou_agendada(youtube)
+            
+            if not broadcast_id:
+                registrar_log_compartilhado("Criando estrutura de live no YouTube...")
+                broadcast_id = preparar_e_criar_metadados(youtube, config)
+                
+            if broadcast_id:
+                atualizar_arquivo_status(broadcast_id, "inativa")
+                registrar_log_compartilhado(f"Live pré-criada com sucesso! ID: [{broadcast_id}]")
+            else:
+                registrar_log_compartilhado("Erro: Não foi possível criar o broadcast.")
+        except Exception as e:
+            registrar_log_compartilhado(f"Erro na pré-criação: {e}")
 
     def acao_iniciar_manual(self):
         def fluxo():
@@ -471,7 +537,6 @@ class AppGUI(ctk.CTk):
                     atualizar_arquivo_status(broadcast_id, "ativa")
                     registrar_log_compartilhado(f"ID gerado com sucesso: [{broadcast_id}]. Gerenciando Thumbnail...")
                     
-                    # Chama a função inteligente corrigida
                     gerenciar_upload_thumbnail(youtube, broadcast_id, config)
                     
                     agora_objeto = datetime.datetime.now().time()
@@ -525,7 +590,7 @@ class AppGUI(ctk.CTk):
                     atualizar_arquivo_status(broadcast_id, "inativa")
                     self.status_atual = "finalizada"
                 else:
-                    registrar_log_compartilhado("⚠️ Erro: Nenhuma transmissão ativa encontrada para finalizar.")
+                    registrar_log_compartilhado("⚠️ Erro: Nenhuma transmissão activa encontrada para finalizar.")
             except Exception as e:
                 registrar_log_compartilhado(f"Erro ao encerrar live: {e}")
             finally:
@@ -550,14 +615,13 @@ def executar_headless(comando):
             broadcast_id = obter_live_ativa_ou_agendada(youtube)
             
             if not broadcast_id:
-                registrar_log_compartilhado("Nenhuma live encontrada para hoje. Criando nova estrutura de metadados...")
+                registrar_log_compartilhado("Nenhuma live encontrada para hoje. Criando estrutura de metadados...")
                 broadcast_id = preparar_e_criar_metadados(youtube, config)
                 
             if broadcast_id:
                 atualizar_arquivo_status(broadcast_id, "ativa")
                 registrar_log_compartilhado(f"Live ID [{broadcast_id}] guardado localmente. Gerenciando thumbnail...")
                 
-                # Chama a contingência também na execução do Agendador do Windows
                 gerenciar_upload_thumbnail(youtube, broadcast_id, config)
                 
                 horario_programado = datetime.datetime.strptime(config["hora_inicio"], "%H:%M").time()
@@ -605,8 +669,10 @@ def executar_headless(comando):
 # ==========================================
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] in ["iniciar", "encerrar"]:
-        executar_headless(sys.argv[1])
+    # CORREÇÃO: Agora o script executa de verdade se receber argumentos do Windows
+    if len(sys.argv) > 1:
+        acao = sys.argv[1]
+        executar_headless(acao)
     else:
         app = AppGUI()
         app.mainloop()

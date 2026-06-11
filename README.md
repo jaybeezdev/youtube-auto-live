@@ -1,10 +1,11 @@
-# Gerenciador de Lives — TV Pernambuco
+# Gerenciador de Lives
 
 Tive a ideia de desenvolver este projeto para a TV Pernambuco (emissora em que atualmente trabalho) a fim de evitar que o canal do Youtube tomasse strikes por exibir conteúdo de terceiros e para evitar esquecimento na hora de iniciar a live diária do jornal "Pernambuco Hoje". Trata-se de um gerenciador automatizado para transmissões ao vivo com autenticador no Youtube, integrado com o Agendador de Tarefas do Windows para permitir automação total sem a necessidade de intervenção manual diária.
+OBS: Esta versão inicial pode apresentar alguns bugs, pois está em fase de testes. Porém, já é 100% funcional para o propósito do projeto. Estão em desenvolvimento condicionais para entradas de informações, tratamento de exceções e melhorias operacionais na interface gráfica.
 
 ## 🚀 Funcionalidades
 - **Automação Completa**: Inicia e encerra transmissões nos horários definidos.
-- **Configuração via Interface**: Interface gráfica intuitiva para definir título, descrição, visibilidade e horários.
+- **Configuração via Interface**: Interface gráfica intuitiva para definir título, descrição, visibilidade, miniatura e horários de início e fim.
 - **Modo Background**: O agendamento roda silenciosamente no Windows, sem janelas indesejadas (via `pythonw.exe`).
 - **Resiliência de Thumbnail**: Tenta enviar a capa personalizada e, em caso de limites de cota da API, mantém a configuração padrão do YouTube para não interromper a live.
 - **Pré-criação de Eventos**: As lives são pré-configuradas no YouTube Studio, garantindo que o sinal esteja pronto no momento do início.
@@ -20,7 +21,7 @@ Tive a ideia de desenvolver este projeto para a TV Pernambuco (emissora em que a
 1. No console do Google Cloud, vá em **APIs e Serviços > Credenciais**.
 2. Crie um **ID do cliente OAuth 2.0** (selecione "Aplicativo de Desktop").
 3. Faça o download do arquivo JSON.
-4. Renomeie o arquivo baixado para `client_secret.json` e coloque-o na pasta raiz deste projeto.
+4. Renomeie o arquivo baixado para `client_secret.json` e copie-o para a pasta raiz deste projeto.
 
 ### 3. Instalação
 Abra o terminal na pasta do projeto e instale as dependências:
@@ -37,13 +38,3 @@ Nunca compartilhe os arquivos token.json ou client_secret.json. Eles contêm as 
 ## 📁 Estrutura de Segurança
 Este projeto utiliza um arquivo .gitignore para garantir que arquivos sensíveis nunca sejam enviados ao GitHub. Certifique-se de não remover as entradas de .json do arquivo .gitignore.
 
-### Próximos passos recomendados:
-1.  **requirements.txt**: Lembre-se de gerar o arquivo com as dependências do seu projeto (usando `pip freeze > requirements.txt`) para que o comando de instalação no README funcione corretamente para quem baixar.
-2.  **gitignore**: Caso ainda não tenha, crie o arquivo `.gitignore` na raiz com o conteúdo abaixo para garantir que você não envie credenciais por engano:
-    
-    token.json
-    client_secret.json
-    venv/
-    __pycache__/
-    .env
-    
